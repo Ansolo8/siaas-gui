@@ -1,0 +1,2 @@
+# siaas/gui/requirements.txt
+tkinter
