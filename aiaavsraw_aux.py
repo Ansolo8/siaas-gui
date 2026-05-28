@@ -1,4 +1,4 @@
-# siaas/siaas-gui/siaas_aux.py
+# siaas/aiaavsraw-gui/aiaavsraw_aux.py
 import json
 import os
 
