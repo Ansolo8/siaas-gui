@@ -81,6 +81,12 @@ def format_modules(modules: list[dict]) -> str:
     return ", ".join(module.get("module", "") for module in modules if isinstance(module, dict) and module.get("module"))
 
 
+def format_module_platform(platform) -> str:
+    if isinstance(platform, list):
+        return ", ".join(str(p) for p in platform if p)
+    return str(platform or "")
+
+
 PORT_VULNERABILITY_DETAIL_KEYS = {
     "description",
     "title",
@@ -277,6 +283,7 @@ def extract_metasploit_services(metasploit_data: dict) -> list[dict]:
         for port, service_info in target_info.get("services", {}).items():
             modules = service_info.get("metasploit_modules", []) or []
             cves = service_info.get("cves", []) or []
+            matched_cves = service_info.get("matched_cves", []) or []
             rows.append(
                 {
                     "Target": target,
@@ -284,6 +291,8 @@ def extract_metasploit_services(metasploit_data: dict) -> list[dict]:
                     "Service": service_info.get("service", "unknown"),
                     "Product": service_info.get("product", ""),
                     "CVEs": ", ".join(cves),
+                    "Matched CVEs": ", ".join(matched_cves),
+                    "Correlation": service_info.get("correlation_method", ""),
                     "Modules": len(modules),
                     "Module Names": format_modules(modules),
                     "Confidence": service_info.get("confidence", "unknown"),
@@ -312,6 +321,7 @@ def extract_remediation_findings(remediation_data: dict) -> list[dict]:
                 "Title": finding.get("title", "Untitled finding"),
                 "CVEs": ", ".join(finding.get("cves", []) or []),
                 "Recommendation": finding.get("recommendation", ""),
+                "First Seen": finding.get("first_seen", ""),
                 "Last Seen": finding.get("last_seen", ""),
                 "ID": finding.get("id", ""),
             }
@@ -498,6 +508,92 @@ def render_vulnerability_explorer(title: str, rows: list[dict], raw_lookup: dict
         render_finding_card(labels.index(selected_label) + 1, filtered[labels.index(selected_label)], raw_lookup=raw_lookup)
 
 
+def render_metasploit_service_detail(row: dict, raw_service: dict) -> None:
+    with st.container(border=True):
+        st.markdown(f"**{row['Target']} : {row['Port']} / {row['Service']}**")
+        if row.get("Product"):
+            st.caption(row["Product"])
+
+        meta = {k: row[k] for k in ("Confidence", "Action", "Correlation") if row.get(k) not in [None, ""]}
+        if row.get("CVEs"):
+            meta["CVEs"] = row["CVEs"]
+        if row.get("Matched CVEs"):
+            meta["Matched CVEs"] = row["Matched CVEs"]
+        if meta:
+            st.dataframe([meta], use_container_width=True, hide_index=True)
+
+        if row.get("Errors"):
+            st.warning(f"Errors: {row['Errors']}")
+
+        modules = raw_service.get("metasploit_modules", []) or []
+        if modules:
+            st.markdown(f"**Candidate Modules ({len(modules)})**")
+            module_rows = []
+            for m in modules:
+                if not isinstance(m, dict):
+                    continue
+                module_rows.append(
+                    {
+                        "Module": m.get("module", ""),
+                        "Rank": m.get("rank", ""),
+                        "Platform": format_module_platform(m.get("platform")),
+                        "Matched CVE": m.get("matched_cve", ""),
+                    }
+                )
+            st.dataframe(module_rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("No candidate modules found for this service.")
+
+
+def render_remediation_detail(row: dict, raw_finding: dict) -> None:
+    with st.container(border=True):
+        severity = str(row.get("Severity", "unknown")).upper()
+        st.markdown(f"**[{severity}] {row.get('Title', 'Finding')}**")
+        location = " / ".join(str(row.get(k, "")) for k in ("Target", "Port") if row.get(k))
+        if location:
+            st.caption(location)
+
+        meta = {k: row[k] for k in ("Service", "Source", "Score", "Status", "CVEs", "First Seen", "Last Seen", "ID") if row.get(k) not in [None, ""]}
+        if raw_finding.get("notes"):
+            meta["Notes"] = raw_finding["notes"]
+        if raw_finding.get("ai_model"):
+            meta["AI Model"] = raw_finding["ai_model"]
+        if meta:
+            st.dataframe([meta], use_container_width=True, hide_index=True)
+
+        if raw_finding.get("ai_error"):
+            st.warning(f"AI Error: {raw_finding['ai_error']}")
+
+        ai_rem = raw_finding.get("ai_remediation")
+        if isinstance(ai_rem, dict):
+            st.markdown("#### AI-Assisted Remediation")
+            if ai_rem.get("risk_summary"):
+                st.markdown("**Risk Summary**")
+                st.write(ai_rem["risk_summary"])
+            if ai_rem.get("likely_impact"):
+                st.markdown("**Likely Impact**")
+                st.write(ai_rem["likely_impact"])
+            if ai_rem.get("priority_reasoning"):
+                st.markdown("**Priority Reasoning**")
+                st.write(ai_rem["priority_reasoning"])
+            steps = ai_rem.get("remediation_steps") or []
+            if steps:
+                st.markdown("**Remediation Steps**")
+                for i, step in enumerate(steps, 1):
+                    st.markdown(f"{i}. {step}")
+            val_steps = ai_rem.get("validation_steps") or []
+            if val_steps:
+                st.markdown("**Validation Steps**")
+                for i, step in enumerate(val_steps, 1):
+                    st.markdown(f"{i}. {step}")
+        elif row.get("Recommendation"):
+            st.markdown("**Recommendation**")
+            st.write(row["Recommendation"])
+
+        with st.expander("Raw finding data"):
+            st.json(raw_finding, expanded=False)
+
+
 def main() -> None:
     st.set_page_config(page_title="SIAAS Web", layout="wide")
     st.title("🔒 SIAAS - Security Audit System (Web)")
@@ -655,15 +751,26 @@ def main() -> None:
         if filtered:
             labels = [f"{row['Target']} | {row['Port']} | {row['Service']} | {row['Modules']} modules" for row in filtered]
             selected_label = st.selectbox("Service correlation details", labels, key="metasploit_details")
-            st.json(filtered[labels.index(selected_label)], expanded=True)
+            selected_row = filtered[labels.index(selected_label)]
+            raw_service = (
+                metasploit_data.get("targets", {})
+                .get(selected_row["Target"], {})
+                .get("services", {})
+                .get(selected_row["Port"], {})
+            )
+            render_metasploit_service_detail(selected_row, raw_service)
         with st.expander("Raw Metasploit assistant DB"):
             st.json(metasploit_data, expanded=False)
 
     with tabs[4]:
         st.subheader("Remediation Advisor")
+        rem_stats = remediation_data.get("stats", {}) if isinstance(remediation_data, dict) else {}
+        module_mode = remediation_data.get("module_mode", "") if isinstance(remediation_data, dict) else ""
+        ai_stats = rem_stats.get("ai", {}) if isinstance(rem_stats, dict) else {}
+
         summary = remediation_data.get("executive_summary", {}) if isinstance(remediation_data, dict) else {}
         if summary:
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Open Findings", summary.get("total_open_findings", len(remediation_rows)))
             with col2:
@@ -671,14 +778,45 @@ def main() -> None:
                 st.metric("Critical/High", int(counts.get("critical", 0) or 0) + int(counts.get("high", 0) or 0))
             with col3:
                 st.metric("Affected Targets", len(summary.get("most_affected_targets", [])))
+            with col4:
+                ai_succeeded = int(ai_stats.get("succeeded", 0) or 0)
+                ai_failed = int(ai_stats.get("failed", 0) or 0)
+                ai_cached = int(ai_stats.get("cached", 0) or 0)
+                st.metric("AI Remediations", ai_succeeded, delta=f"{ai_cached} cached" if ai_cached else None)
             st.info(summary.get("recommended_next_step", "Review the prioritized remediation plan below."))
 
-        source_filter = st.multiselect("Source", sorted({row.get("Source", "unknown") for row in remediation_rows}), default=[])
-        severity_filter = st.multiselect("Severity", ["critical", "high", "medium", "low", "info", "unknown"], default=[], key="remediation_severity")
+        if module_mode or ai_stats:
+            info_parts = []
+            if module_mode:
+                label = "AI-assisted" if "ai" in module_mode else "Local rules"
+                info_parts.append(f"**Mode:** {label} (`{module_mode}`)")
+            if ai_stats.get("provider") or ai_stats.get("model"):
+                model_str = " / ".join(str(v) for v in (ai_stats.get("provider"), ai_stats.get("model")) if v)
+                info_parts.append(f"**AI Model:** {model_str}")
+            if ai_failed:
+                info_parts.append(f"**AI Failures:** {ai_failed}")
+            st.caption("  ·  ".join(info_parts))
+
+        remediation_by_id = {
+            f.get("id", ""): f
+            for f in (remediation_data.get("remediation_plan", []) if isinstance(remediation_data, dict) else [])
+            if isinstance(f, dict)
+        }
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            source_filter = st.multiselect("Source", sorted({row.get("Source", "unknown") for row in remediation_rows}), default=[])
+        with col2:
+            severity_filter = st.multiselect("Severity", ["critical", "high", "medium", "low", "info", "unknown"], default=[], key="remediation_severity")
+        with col3:
+            status_filter = st.multiselect("Status", sorted({row.get("Status", "open") for row in remediation_rows if row.get("Status")}), default=[])
         text_filter = st.text_input("Filter remediation plan", key="remediation_filter")
+
         filtered = filter_by_severity(remediation_rows, severity_filter)
         if source_filter:
             filtered = [row for row in filtered if row.get("Source") in source_filter]
+        if status_filter:
+            filtered = [row for row in filtered if row.get("Status") in status_filter]
         if text_filter:
             filtered = [row for row in filtered if text_filter.lower() in " ".join(str(v).lower() for v in row.values())]
 
@@ -687,9 +825,8 @@ def main() -> None:
             labels = [f"{row['Severity'].upper()} | {row['Target']} | {row['Title'][:90]}" for row in filtered]
             selected_label = st.selectbox("Remediation details", labels, key="remediation_details")
             selected = filtered[labels.index(selected_label)]
-            st.json(selected, expanded=True)
-            st.markdown("**Recommendation**")
-            st.write(selected.get("Recommendation", ""))
+            raw_finding = remediation_by_id.get(selected.get("ID", ""), selected)
+            render_remediation_detail(selected, raw_finding)
         with st.expander("Raw remediation DB"):
             st.json(remediation_data, expanded=False)
 
