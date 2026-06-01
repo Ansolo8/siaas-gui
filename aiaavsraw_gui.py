@@ -17,6 +17,7 @@ PORTSCANNER_DB = os.path.join(VAR_DIR, "portscanner.db")
 WEBSCANNER_DB = os.path.join(VAR_DIR, "webscanner.db")
 METASPLOIT_DB = os.path.join(VAR_DIR, "metasploit.db")
 REMEDIATION_DB = os.path.join(VAR_DIR, "remediation.db")
+AUDIT_DB = os.path.join(VAR_DIR, "audit.db")
 
 SEVERITY_ORDER = {
     "critical": 5,
@@ -32,12 +33,13 @@ SEVERITY_ORDER = {
 
 
 @st.cache_data(ttl=30)
-def load_data() -> tuple[dict, dict, dict, dict]:
+def load_data() -> tuple[dict, dict, dict, dict, dict]:
     port_data = siaas_aux.read_from_local_file(PORTSCANNER_DB) or {}
     web_data = siaas_aux.read_from_local_file(WEBSCANNER_DB) or {}
     metasploit_data = siaas_aux.read_from_local_file(METASPLOIT_DB) or {}
     remediation_data = siaas_aux.read_from_local_file(REMEDIATION_DB) or {}
-    return port_data, web_data, metasploit_data, remediation_data
+    audit_data = siaas_aux.read_from_local_file(AUDIT_DB) or {}
+    return port_data, web_data, metasploit_data, remediation_data, audit_data
 
 
 def normalize_severity(value) -> str:
@@ -600,6 +602,190 @@ def render_remediation_detail(row: dict, raw_finding: dict) -> None:
             st.json(raw_finding, expanded=False)
 
 
+RISK_LEVEL_COLOURS = {
+    "critical": "🔴",
+    "high": "🟠",
+    "medium": "🟡",
+    "low": "🟢",
+    "info": "🔵",
+    "unknown": "⚪",
+}
+
+
+def risk_badge(level: str) -> str:
+    level = str(level or "unknown").lower()
+    return f"{RISK_LEVEL_COLOURS.get(level, '⚪')} {level.upper()}"
+
+
+def render_audit_tab(audit_data: dict) -> None:
+    if not audit_data:
+        st.info("No audit report found. Run the audit module to generate one.")
+        return
+
+    narrative = audit_data.get("narrative", {})
+    org = audit_data.get("org_metrics", {})
+    host_metrics = audit_data.get("host_metrics", [])
+    web_metrics = audit_data.get("web_metrics", [])
+    sev_counts = org.get("remediation_severity_counts", {})
+
+    # ── Posture banner ────────────────────────────────────────────────────────
+    risk_level = str(org.get("org_risk_level", "unknown")).lower()
+    risk_score = org.get("org_risk_score", "N/A")
+    badge_colour = {"critical": "red", "high": "orange", "medium": "#e6b800", "low": "green"}.get(risk_level, "grey")
+    st.markdown(
+        f"<div style='padding:12px 18px;border-radius:8px;background:{badge_colour}22;border-left:5px solid {badge_colour}'>"
+        f"<span style='font-size:1.3em;font-weight:700;color:{badge_colour}'>{risk_badge(risk_level)}</span>"
+        f"&nbsp;&nbsp;<span style='font-size:1.1em'>Overall Risk Score: <b>{risk_score}</b></span>"
+        f"&nbsp;&nbsp;<span style='opacity:.7'>{narrative.get('overall_posture','')}</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.write("")
+
+    # ── Org stats bar ─────────────────────────────────────────────────────────
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Hosts Scanned", org.get("total_hosts_scanned", 0))
+    c2.metric("Web Targets", org.get("total_web_targets_scanned", 0))
+    c3.metric("Open Ports", org.get("total_open_ports", 0))
+    c4.metric("Unique CVEs", org.get("total_unique_cves", 0))
+    c5.metric("Exploitable Hosts", org.get("exploitable_hosts", 0))
+
+    st.divider()
+
+    # ── Executive summary + severity breakdown ────────────────────────────────
+    col_left, col_right = st.columns([3, 2])
+
+    with col_left:
+        st.markdown("#### Executive Summary")
+        st.write(narrative.get("executive_summary", ""))
+
+        if narrative.get("key_risks"):
+            st.markdown("**Key Risks**")
+            for risk in narrative["key_risks"]:
+                st.markdown(f"- {risk}")
+
+        if narrative.get("positive_observations"):
+            st.markdown("**Positive Observations**")
+            for obs in narrative["positive_observations"]:
+                st.markdown(f"- ✅ {obs}")
+
+    with col_right:
+        st.markdown("#### Severity Breakdown")
+        sev_order = ["critical", "high", "medium", "low", "info", "unknown"]
+        sev_rows = [
+            {"Severity": s.capitalize(), "Count": int(sev_counts.get(s, 0) or 0)}
+            for s in sev_order
+            if int(sev_counts.get(s, 0) or 0) > 0
+        ]
+        if sev_rows:
+            st.bar_chart(
+                {r["Severity"]: r["Count"] for r in sev_rows},
+                use_container_width=True,
+                height=220,
+            )
+        else:
+            st.info("No severity data.")
+
+    st.divider()
+
+    # ── Priority actions ──────────────────────────────────────────────────────
+    if narrative.get("priority_actions"):
+        st.markdown("#### Priority Actions")
+        for i, action in enumerate(narrative["priority_actions"], 1):
+            st.markdown(f"{i}. {action}")
+
+    st.divider()
+
+    # ── Host & web metrics tables ─────────────────────────────────────────────
+    col_h, col_w = st.columns(2)
+
+    with col_h:
+        st.markdown("#### Host Risk Summary")
+        if host_metrics:
+            host_rows = []
+            for h in host_metrics:
+                host_rows.append({
+                    "Host": h.get("host", ""),
+                    "Risk": risk_badge(h.get("risk_level", "unknown")),
+                    "Risk Score": h.get("risk_score", 0),
+                    "Open Ports": h.get("num_open_ports", 0),
+                    "CVEs": h.get("num_cves", 0),
+                    "Exploitable": "⚠️ Yes" if h.get("exploitable") else "No",
+                    "OS": h.get("os_family", ""),
+                })
+            st.dataframe(host_rows, use_container_width=True, hide_index=True)
+
+            with st.expander("Host details"):
+                for h in host_metrics:
+                    with st.container(border=True):
+                        st.markdown(f"**{h.get('host','')}** — {risk_badge(h.get('risk_level','unknown'))} (score: {h.get('risk_score',0)})")
+                        if h.get("cves"):
+                            st.caption("CVEs: " + ", ".join(h["cves"]))
+                        if h.get("open_ports"):
+                            st.caption("Ports: " + ", ".join(h["open_ports"]))
+                        if h.get("metasploit_modules"):
+                            st.markdown("**Metasploit modules:** " + ", ".join(h["metasploit_modules"]))
+                        findings = h.get("remediation_findings", [])
+                        if findings:
+                            st.markdown("**Remediation findings:**")
+                            for f in findings:
+                                sev = str(f.get("severity", "")).upper()
+                                st.markdown(f"- [{sev}] {f.get('description', f.get('id', ''))}")
+        else:
+            st.info("No host metrics available.")
+
+    with col_w:
+        st.markdown("#### Web Target Risk Summary")
+        if web_metrics:
+            web_rows = []
+            for w in web_metrics:
+                web_rows.append({
+                    "Target": w.get("target", ""),
+                    "Risk": risk_badge(w.get("risk_level", "unknown")),
+                    "Risk Score": w.get("risk_score", 0),
+                    "Unique Findings": w.get("total_unique_findings", 0),
+                    "Instances": w.get("total_instances", 0),
+                    "High Findings": w.get("high_findings", 0),
+                    "Scan Mode": w.get("scan_mode", ""),
+                })
+            st.dataframe(web_rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("No web metrics available.")
+
+    st.divider()
+
+    # ── Remediation roadmap ───────────────────────────────────────────────────
+    roadmap = narrative.get("remediation_roadmap", [])
+    if roadmap:
+        st.markdown("#### Remediation Roadmap")
+        phase_cols = st.columns(len(roadmap))
+        for col, phase in zip(phase_cols, roadmap):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"**{phase.get('phase', '')}**")
+                    for action in phase.get("actions", []):
+                        st.markdown(f"- {action}")
+
+    st.divider()
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    footer_parts = []
+    if audit_data.get("last_check"):
+        footer_parts.append(f"Generated: {audit_data['last_check'][:19]}")
+    if audit_data.get("module_mode"):
+        footer_parts.append(f"Mode: `{audit_data['module_mode']}`")
+    if audit_data.get("narrative_source"):
+        footer_parts.append(f"AI: `{audit_data['narrative_source']}`")
+    stats = audit_data.get("stats", {})
+    if stats.get("time_taken_sec") is not None:
+        footer_parts.append(f"Time: {stats['time_taken_sec']}s")
+    if footer_parts:
+        st.caption("  ·  ".join(footer_parts))
+
+    with st.expander("Raw audit DB"):
+        st.json(audit_data, expanded=False)
+
+
 def main() -> None:
     st.set_page_config(page_title="SIAAS Web", layout="wide")
     st.title("🔒 SIAAS - Security Audit System (Web)")
@@ -608,13 +794,16 @@ def main() -> None:
     if st.button("Refresh data"):
         st.cache_data.clear()
 
-    port_data, web_data, metasploit_data, remediation_data = load_data()
+    port_data, web_data, metasploit_data, remediation_data, audit_data = load_data()
     remediation_rows = extract_remediation_findings(remediation_data)
     metasploit_rows = extract_metasploit_services(metasploit_data)
 
-    tabs = st.tabs(["Dashboard", "Port Scanner", "Web Scanner", "Metasploit", "Remediation"])
+    tabs = st.tabs(["Audit Report", "Dashboard", "Port Scanner", "Web Scanner", "Metasploit", "Remediation"])
 
     with tabs[0]:
+        render_audit_tab(audit_data)
+
+    with tabs[1]:
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
@@ -649,7 +838,7 @@ def main() -> None:
         st.subheader("Top Risk Hosts (Consolidated)")
         build_dashboard(port_data, web_data, metasploit_data, remediation_data)
 
-    with tabs[1]:
+    with tabs[2]:
         st.subheader("Port Scanner Results")
         host_filter = st.text_input("Filter hosts", key="port_filter")
 
@@ -700,7 +889,7 @@ def main() -> None:
             with detail_tabs[3]:
                 st.json(selected, expanded=False)
 
-    with tabs[2]:
+    with tabs[3]:
         st.subheader("Web Scanner Results")
         target_filter = st.text_input("Filter targets", key="web_filter")
 
@@ -740,7 +929,7 @@ def main() -> None:
             with detail_tabs[2]:
                 st.json(selected, expanded=False)
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("Metasploit Assistant")
         st.caption("Defensive correlation only: shows CVEs/services/products mapped to local Metasploit module candidates.")
         col1, col2, col3 = st.columns(3)
@@ -768,7 +957,7 @@ def main() -> None:
         with st.expander("Raw Metasploit assistant DB"):
             st.json(metasploit_data, expanded=False)
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Remediation Advisor")
         rem_stats = remediation_data.get("stats", {}) if isinstance(remediation_data, dict) else {}
         module_mode = remediation_data.get("module_mode", "") if isinstance(remediation_data, dict) else ""
