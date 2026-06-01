@@ -99,7 +99,7 @@ def render_run_now_button(module: str, last_check: str) -> None:
             st.session_state.pop(triggered_key, None)
             triggered_at = ""
 
-    col_btn, col_status = st.columns([1, 5])
+    col_btn, col_cancel, col_status = st.columns([1, 1, 6])
     with col_btn:
         if st.button("▶ Run now", key=f"run_now_{module}"):
             with st.spinner("Sending trigger to server…"):
@@ -110,13 +110,45 @@ def render_run_now_button(module: str, last_check: str) -> None:
                 st.rerun()
             else:
                 st.error(f"Could not trigger module: {result}")
+    with col_cancel:
+        if triggered_at:
+            if st.button("✕ Clear", key=f"clear_trigger_{module}"):
+                st.session_state.pop(triggered_key, None)
+                st.rerun()
     with col_status:
         if triggered_at:
-            st.info("⏳ Triggered — waiting for agent to report back…")
+            st.info(f"⏳ Triggered at {triggered_at[:19]} UTC — waiting for agent to report back… (click ✕ Clear if the agent is not running)")
         elif last_check:
             st.caption(f"Last run: {last_check[:19]} UTC")
         else:
             st.caption("Waiting for first run")
+
+    # Connection diagnostics expander
+    with st.expander("Connection diagnostics", expanded=False):
+        api_uri, uid, api_user, api_pwd, ssl_ignore = load_agent_connection()
+        diag_rows = [
+            {"Setting": "Server URL (api_uri)", "Value": api_uri or "❌ not found in config.db"},
+            {"Setting": "Agent UID", "Value": uid or "❌ not found in var/uid"},
+            {"Setting": "Auth user (api_user)", "Value": api_user or "(none — no auth)"},
+            {"Setting": "SSL ignore verify", "Value": str(ssl_ignore)},
+        ]
+        st.dataframe(diag_rows, use_container_width=True, hide_index=True)
+        if api_uri and uid:
+            st.caption(f"Would POST to: `{api_uri}/siaas-server/agents/configs/{uid}`  with body `{{\"trigger_{module}\": \"<timestamp>\"}}`")
+        if st.button("Test connection (GET agent config)", key=f"diag_test_{module}"):
+            if not _REQUESTS_AVAILABLE:
+                st.error("requests library not installed")
+            elif not api_uri or not uid:
+                st.error("Server URL or agent UID missing — check siaas-agent/var/config.db and var/uid")
+            else:
+                url = f"{api_uri}/siaas-server/agents/configs/{uid}"
+                auth = (api_user, api_pwd) if api_user and api_pwd else None
+                try:
+                    resp = _requests.get(url, auth=auth, verify=not ssl_ignore, timeout=5)
+                    st.success(f"HTTP {resp.status_code} — server reachable")
+                    st.json(resp.json() if resp.content else {})
+                except Exception as exc:
+                    st.error(f"Connection failed: {exc}")
 
 
 def normalize_severity(value) -> str:
