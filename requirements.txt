@@ -1,3 +1,4 @@
 # siaas/gui/requirements.txt
 #tkinter
 streamlit>=1.34,<2
+requests>=2.28

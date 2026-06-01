@@ -7,6 +7,12 @@ import os
 from datetime import datetime
 from urllib.parse import urlparse
 
+try:
+    import requests as _requests
+    _REQUESTS_AVAILABLE = True
+except ImportError:
+    _REQUESTS_AVAILABLE = False
+
 import streamlit as st
 
 import aiaavsraw_aux as siaas_aux
@@ -18,6 +24,8 @@ WEBSCANNER_DB = os.path.join(VAR_DIR, "webscanner.db")
 METASPLOIT_DB = os.path.join(VAR_DIR, "metasploit.db")
 REMEDIATION_DB = os.path.join(VAR_DIR, "remediation.db")
 AUDIT_DB = os.path.join(VAR_DIR, "audit.db")
+AGENT_CONFIG_DB = os.path.join(VAR_DIR, "config.db")
+AGENT_UID_FILE = os.path.join(VAR_DIR, "uid")
 
 SEVERITY_ORDER = {
     "critical": 5,
@@ -40,6 +48,75 @@ def load_data() -> tuple[dict, dict, dict, dict, dict]:
     remediation_data = siaas_aux.read_from_local_file(REMEDIATION_DB) or {}
     audit_data = siaas_aux.read_from_local_file(AUDIT_DB) or {}
     return port_data, web_data, metasploit_data, remediation_data, audit_data
+
+
+def load_agent_connection() -> tuple[str, str, str, str, bool]:
+    """Return (api_uri, agent_uid, api_user, api_pwd, ssl_ignore) from local agent files."""
+    config = siaas_aux.read_from_local_file(AGENT_CONFIG_DB) or {}
+    try:
+        with open(AGENT_UID_FILE) as fh:
+            uid = fh.read().strip()
+    except OSError:
+        uid = ""
+    api_uri = str(config.get("api_uri", "")).rstrip("/")
+    api_user = str(config.get("api_user", ""))
+    api_pwd = str(config.get("api_pwd", ""))
+    ssl_ignore = str(config.get("api_ssl_ignore_verify", "false")).lower() in ("1", "true", "yes")
+    return api_uri, uid, api_user, api_pwd, ssl_ignore
+
+
+def trigger_module(module: str) -> tuple[bool, str]:
+    """POST trigger_<module>=<timestamp> to the server agent configs endpoint.
+    Returns (success, triggered_timestamp_or_error_message)."""
+    if not _REQUESTS_AVAILABLE:
+        return False, "requests library not installed — run pip install requests"
+    api_uri, uid, api_user, api_pwd, ssl_ignore = load_agent_connection()
+    if not api_uri:
+        return False, "api_uri not found in siaas-agent/var/config.db"
+    if not uid:
+        return False, "Agent UID not found in siaas-agent/var/uid"
+    url = f"{api_uri}/siaas-server/agents/configs/{uid}"
+    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {f"trigger_{module}": ts}
+    auth = (api_user, api_pwd) if api_user and api_pwd else None
+    try:
+        resp = _requests.post(url, json=payload, auth=auth, verify=not ssl_ignore, timeout=5)
+        if resp.status_code == 200:
+            return True, ts
+        return False, f"Server returned HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def render_run_now_button(module: str, last_check: str) -> None:
+    """Render a Run now button with live status for the given module name."""
+    triggered_key = f"triggered_{module}"
+    triggered_at = st.session_state.get(triggered_key, "")
+
+    # Clear triggered state once the agent has reported back with newer data
+    if triggered_at and last_check:
+        if last_check.rstrip("Z").replace("T", " ") > triggered_at.rstrip("Z").replace("T", " "):
+            st.session_state.pop(triggered_key, None)
+            triggered_at = ""
+
+    col_btn, col_status = st.columns([1, 5])
+    with col_btn:
+        if st.button("▶ Run now", key=f"run_now_{module}"):
+            with st.spinner("Sending trigger to server…"):
+                ok, result = trigger_module(module)
+            if ok:
+                st.session_state[triggered_key] = result
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"Could not trigger module: {result}")
+    with col_status:
+        if triggered_at:
+            st.info("⏳ Triggered — waiting for agent to report back…")
+        elif last_check:
+            st.caption(f"Last run: {last_check[:19]} UTC")
+        else:
+            st.caption("Waiting for first run")
 
 
 def normalize_severity(value) -> str:
@@ -618,8 +695,10 @@ def risk_badge(level: str) -> str:
 
 
 def render_audit_tab(audit_data: dict) -> None:
+    render_run_now_button("audit", audit_data.get("last_check", "") if audit_data else "")
+
     if not audit_data:
-        st.info("No audit report found. Run the audit module to generate one.")
+        st.info("No audit report found yet — click ▶ Run now above to generate one.")
         return
 
     narrative = audit_data.get("narrative", {})
@@ -932,6 +1011,16 @@ def main() -> None:
     with tabs[4]:
         st.subheader("Metasploit Assistant")
         st.caption("Defensive correlation only: shows CVEs/services/products mapped to local Metasploit module candidates.")
+        msf_last_check = metasploit_data.get("last_check", "")
+        msf_module_mode = metasploit_data.get("module_mode", "")
+        msf_info_parts = []
+        if msf_module_mode:
+            msf_info_parts.append(f"Mode: `{msf_module_mode}`")
+        if msf_last_check:
+            msf_info_parts.append(f"Last check: {msf_last_check[:19]} UTC")
+        if msf_info_parts:
+            st.caption("  ·  ".join(msf_info_parts))
+        render_run_now_button("metasploit", msf_last_check)
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Targets", metasploit_data.get("stats", {}).get("num_targets", 0))
@@ -961,7 +1050,9 @@ def main() -> None:
         st.subheader("Remediation Advisor")
         rem_stats = remediation_data.get("stats", {}) if isinstance(remediation_data, dict) else {}
         module_mode = remediation_data.get("module_mode", "") if isinstance(remediation_data, dict) else ""
+        rem_last_check = remediation_data.get("last_check", "") if isinstance(remediation_data, dict) else ""
         ai_stats = rem_stats.get("ai", {}) if isinstance(rem_stats, dict) else {}
+        render_run_now_button("remediation", rem_last_check)
 
         summary = remediation_data.get("executive_summary", {}) if isinstance(remediation_data, dict) else {}
         if summary:
@@ -990,6 +1081,8 @@ def main() -> None:
                 info_parts.append(f"**AI Model:** {model_str}")
             if ai_failed:
                 info_parts.append(f"**AI Failures:** {ai_failed}")
+            if rem_last_check:
+                info_parts.append(f"Last check: {rem_last_check[:19]} UTC")
             st.caption("  ·  ".join(info_parts))
 
         remediation_by_id = {
