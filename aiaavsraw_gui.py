@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -351,7 +352,12 @@ def build_dashboard(port_data: dict, web_data: dict, metasploit_data: dict, reme
             consolidated[host]["last_scan"] = last_check
 
     for target_key, info in web_data.items():
-        host = target_key.split(":", 1)[0]
+        scanned_url = info.get("system_info", {}).get("scanned_url", "")
+        if scanned_url:
+            parsed = urlparse(scanned_url)
+            host = parsed.hostname or target_key.split(":", 1)[0]
+        else:
+            host = target_key.split(":", 1)[0]
         stats = info.get("stats", {})
         last_check = info.get("last_check", "")
         consolidated.setdefault(host, {"vulns": 0, "exploits": 0, "msf": 0, "remediation": 0, "last_scan": "", "scanners": set()})
