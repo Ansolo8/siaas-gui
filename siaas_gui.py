@@ -15,7 +15,10 @@ except ImportError:
 
 import streamlit as st
 
-import aiaavsraw_aux as siaas_aux
+try:
+    import siaas_gui_aux as siaas_aux
+except ImportError:
+    import aiaavsraw_aux as siaas_aux
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VAR_DIR = os.path.join(BASE_DIR, "siaas-agent", "var")
