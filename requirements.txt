@@ -1,3 +1,3 @@
-# siaas/gui/requirements.txt
-#tkinter
+# SIAAS GUI — Python dependencies
 streamlit>=1.34,<2
+requests>=2.28
