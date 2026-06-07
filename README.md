@@ -1,6 +1,6 @@
 # SIAAS GUI
 
-Web dashboard for the **SIAAS — Security Audit System** agent. Displays scan results, vulnerability findings, AI-assisted remediation, and consolidated security posture in real time. Built with [Streamlit](https://streamlit.io).
+Web dashboard for the **SIAAS — Security Audit System** agent available in [here](https://github.com/jpseara/siaas-agent) and extended version available in [here](https://github.com/Ansolo8/siaas-agent). Displays scan results, vulnerability findings, AI-assisted remediation, and consolidated security posture in real time. Built with [Streamlit](https://streamlit.io).
 
 ---
 
